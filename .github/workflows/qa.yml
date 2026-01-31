@@ -1,0 +1,404 @@
+# Comprehensive QA Pipeline
+# Uses `core php` CLI where available, reports results via PR comments and SARIF
+#
+# Results:
+#   - PR comment with summary table
+#   - SARIF upload to GitHub Security tab
+#   - JSON artifacts for downstream processing
+
+name: QA Pipeline
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+env:
+  PHP_VERSION: '8.3'
+  CORE_VERSION: 'latest'
+
+jobs:
+  # ============================================================
+  # Install Core CLI
+  # ============================================================
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      core-version: ${{ steps.core.outputs.version }}
+    steps:
+      - name: Install Core CLI
+        id: core
+        run: |
+          # Try to download core CLI, fall back to skip if not available
+          if curl -fsSL "https://github.com/host-uk/core/releases/latest/download/core-linux-amd64.tar.gz" -o core.tar.gz 2>/dev/null; then
+            tar -xzf core.tar.gz
+            sudo mv core /usr/local/bin/core
+            chmod +x /usr/local/bin/core
+            echo "version=$(core --version 2>/dev/null || echo 'unknown')" >> $GITHUB_OUTPUT
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "version=unavailable" >> $GITHUB_OUTPUT
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ============================================================
+  # Tests
+  # ============================================================
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.test.outputs.tests }}
+      assertions: ${{ steps.test.outputs.assertions }}
+      status: ${{ steps.test.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          coverage: xdebug
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Run tests
+        id: test
+        run: |
+          set +e
+          OUTPUT=$(vendor/bin/phpunit --log-junit test-results.xml 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+
+          # Extract test counts
+          TESTS=$(echo "$OUTPUT" | grep -oP '\d+(?= tests)' | head -1 || echo "0")
+          ASSERTIONS=$(echo "$OUTPUT" | grep -oP '\d+(?= assertions)' | head -1 || echo "0")
+
+          echo "tests=${TESTS:-0}" >> $GITHUB_OUTPUT
+          echo "assertions=${ASSERTIONS:-0}" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=✓" >> $GITHUB_OUTPUT
+          else
+            echo "status=✗" >> $GITHUB_OUTPUT
+          fi
+
+          exit $EXIT_CODE
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+  # ============================================================
+  # Static Analysis - PHPStan
+  # ============================================================
+  phpstan:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    outputs:
+      errors: ${{ steps.stan.outputs.errors }}
+      status: ${{ steps.stan.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Run PHPStan
+        id: stan
+        run: |
+          set +e
+          vendor/bin/phpstan analyse --error-format=json --no-progress > phpstan.json 2>&1
+          EXIT_CODE=$?
+
+          # Also run for GitHub format
+          vendor/bin/phpstan analyse --error-format=github --no-progress 2>&1 || true
+
+          ERRORS=$(jq '.totals.file_errors // 0' phpstan.json 2>/dev/null || echo "0")
+          echo "errors=${ERRORS}" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=✓" >> $GITHUB_OUTPUT
+          else
+            echo "status=✗" >> $GITHUB_OUTPUT
+          fi
+
+          exit $EXIT_CODE
+
+      - name: Upload PHPStan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phpstan-results
+          path: phpstan.json
+
+  # ============================================================
+  # Static Analysis - Psalm
+  # ============================================================
+  psalm:
+    name: Psalm
+    runs-on: ubuntu-latest
+    outputs:
+      errors: ${{ steps.psalm.outputs.errors }}
+      status: ${{ steps.psalm.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Run Psalm
+        id: psalm
+        run: |
+          set +e
+          vendor/bin/psalm --output-format=json --show-info=false > psalm.json 2>&1
+          EXIT_CODE=$?
+
+          # Generate SARIF for GitHub Security
+          vendor/bin/psalm --output-format=sarif --show-info=false > psalm.sarif 2>&1 || true
+
+          ERRORS=$(jq 'length' psalm.json 2>/dev/null || echo "0")
+          echo "errors=${ERRORS}" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=✓" >> $GITHUB_OUTPUT
+          else
+            echo "status=✗" >> $GITHUB_OUTPUT
+          fi
+
+          exit $EXIT_CODE
+
+      - name: Upload Psalm SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: psalm.sarif
+          category: psalm
+        continue-on-error: true
+
+      - name: Upload Psalm results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: psalm-results
+          path: |
+            psalm.json
+            psalm.sarif
+
+  # ============================================================
+  # Code Style
+  # ============================================================
+  style:
+    name: Code Style
+    runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.fmt.outputs.files }}
+      status: ${{ steps.fmt.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: dom, curl, libxml, mbstring, zip
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Check code style
+        id: fmt
+        run: |
+          set +e
+          OUTPUT=$(vendor/bin/pint --test --format=json 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT" > pint.json
+
+          FILES=$(echo "$OUTPUT" | jq '.files | length' 2>/dev/null || echo "0")
+          echo "files=${FILES}" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=✓" >> $GITHUB_OUTPUT
+          else
+            echo "status=⚠" >> $GITHUB_OUTPUT
+          fi
+
+          # Don't fail on style issues, just report
+          exit 0
+
+      - name: Upload style results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: style-results
+          path: pint.json
+
+  # ============================================================
+  # Security Audit
+  # ============================================================
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    outputs:
+      vulnerabilities: ${{ steps.audit.outputs.vulnerabilities }}
+      status: ${{ steps.audit.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: dom, curl, libxml, mbstring, zip
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Security audit
+        id: audit
+        run: |
+          set +e
+          composer audit --format=json > audit.json 2>&1
+          EXIT_CODE=$?
+
+          VULNS=$(jq '.advisories | to_entries | map(.value | length) | add // 0' audit.json 2>/dev/null || echo "0")
+          echo "vulnerabilities=${VULNS}" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=✓" >> $GITHUB_OUTPUT
+          else
+            echo "status=✗" >> $GITHUB_OUTPUT
+          fi
+
+          # Report but don't fail
+          exit 0
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-results
+          path: audit.json
+
+  # ============================================================
+  # Summary Report
+  # ============================================================
+  report:
+    name: Report
+    runs-on: ubuntu-latest
+    needs: [test, phpstan, psalm, style, security]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./results
+
+      - name: Generate summary
+        id: summary
+        run: |
+          cat << 'EOF' > summary.md
+          ## QA Pipeline Results
+
+          | Check | Status | Details |
+          |-------|--------|---------|
+          | Tests | ${{ needs.test.outputs.status }} | ${{ needs.test.outputs.tests }} tests, ${{ needs.test.outputs.assertions }} assertions |
+          | PHPStan | ${{ needs.phpstan.outputs.status }} | ${{ needs.phpstan.outputs.errors }} errors |
+          | Psalm | ${{ needs.psalm.outputs.status }} | ${{ needs.psalm.outputs.errors }} issues |
+          | Code Style | ${{ needs.style.outputs.status }} | ${{ needs.style.outputs.files }} files need formatting |
+          | Security | ${{ needs.security.outputs.status }} | ${{ needs.security.outputs.vulnerabilities }} vulnerabilities |
+
+          <details>
+          <summary>Artifacts</summary>
+
+          - `test-results.xml` - JUnit test results
+          - `phpstan.json` - PHPStan analysis
+          - `psalm.json` / `psalm.sarif` - Psalm analysis
+          - `pint.json` - Code style report
+          - `audit.json` - Security audit
+
+          </details>
+
+          ---
+          *Generated by [core php qa](https://github.com/host-uk/core) pipeline*
+          EOF
+
+          cat summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('summary.md', 'utf8');
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('QA Pipeline Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: summary
+              });
+            }
+
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-summary
+          path: |
+            summary.md
+            results/
