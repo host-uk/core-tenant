@@ -1,0 +1,11 @@
+# CodeRabbit Configuration
+# Inherits from: https://github.com/host-uk/coderabbit/.coderabbit.yaml
+
+reviews:
+  review_status: false
+  
+  path_instructions:
+    - path: "src/**"
+      instructions: "Core module code - check event listeners and lifecycle hooks"
+    - path: "database/migrations/**"
+      instructions: "Check for reversible migrations and proper indexes"
