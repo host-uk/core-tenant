@@ -1,0 +1,23 @@
+name: Auto-add to Project
+
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add to Workstation (agentic)
+        if: contains(github.event.issue.labels.*.name, 'agentic')
+        uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/host-uk/projects/2
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+
+      - name: Add to Core.PHP (lang:php)
+        if: contains(github.event.issue.labels.*.name, 'lang:php')
+        uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/host-uk/projects/3
+          github-token: ${{ secrets.PROJECT_TOKEN }}
