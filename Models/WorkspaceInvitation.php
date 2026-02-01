@@ -25,6 +25,7 @@ class WorkspaceInvitation extends Model
         'workspace_id',
         'email',
         'token',
+        'token_hint',
         'role',
         'invited_by',
         'expires_at',
@@ -39,7 +40,7 @@ class WorkspaceInvitation extends Model
     /**
      * The "booted" method of the model.
      *
-     * Automatically hashes tokens when creating invitations.
+     * Automatically hashes tokens and stores hint when creating invitations.
      */
     protected static function booted(): void
     {
@@ -47,6 +48,8 @@ class WorkspaceInvitation extends Model
             // Only hash if the token looks like a plaintext token (not already hashed)
             // Bcrypt hashes start with $2y$ and are 60 chars
             if ($invitation->token && ! str_starts_with($invitation->token, '$2y$')) {
+                // Store first 8 chars as hint for indexed lookup before hashing
+                $invitation->token_hint = substr($invitation->token, 0, 8);
                 $invitation->token = Hash::make($invitation->token);
             }
         });
@@ -133,18 +136,31 @@ class WorkspaceInvitation extends Model
     /**
      * Find invitation by token.
      *
-     * Since tokens are hashed, we must check each pending/valid invitation
-     * against the provided plaintext token using Hash::check().
+     * Uses token_hint for indexed lookup, then verifies with bcrypt.
+     * Falls back to full scan for invitations without hints (legacy).
      */
     public static function findByToken(string $token): ?self
     {
-        // Get all invitations and check the hash
-        // We limit to recent invitations to improve performance
-        $invitations = static::orderByDesc('created_at')
-            ->limit(1000)
+        $hint = substr($token, 0, 8);
+
+        // First, try indexed lookup using token_hint
+        $candidates = static::where('token_hint', $hint)
+            ->orderByDesc('created_at')
             ->get();
 
-        foreach ($invitations as $invitation) {
+        foreach ($candidates as $invitation) {
+            if (Hash::check($token, $invitation->token)) {
+                return $invitation;
+            }
+        }
+
+        // Fallback: check legacy invitations without token_hint (limit scan)
+        $legacyInvitations = static::whereNull('token_hint')
+            ->orderByDesc('created_at')
+            ->limit(100)
+            ->get();
+
+        foreach ($legacyInvitations as $invitation) {
             if (Hash::check($token, $invitation->token)) {
                 return $invitation;
             }
@@ -156,15 +172,30 @@ class WorkspaceInvitation extends Model
     /**
      * Find pending invitation by token.
      *
-     * Since tokens are hashed, we must check each pending invitation
-     * against the provided plaintext token using Hash::check().
+     * Uses token_hint for indexed lookup, then verifies with bcrypt.
+     * Falls back to full scan for invitations without hints (legacy).
      */
     public static function findPendingByToken(string $token): ?self
     {
-        // Get pending invitations and check the hash
-        $invitations = static::pending()->get();
+        $hint = substr($token, 0, 8);
 
-        foreach ($invitations as $invitation) {
+        // First, try indexed lookup using token_hint
+        $candidates = static::pending()
+            ->where('token_hint', $hint)
+            ->get();
+
+        foreach ($candidates as $invitation) {
+            if (Hash::check($token, $invitation->token)) {
+                return $invitation;
+            }
+        }
+
+        // Fallback: check legacy pending invitations without token_hint
+        $legacyInvitations = static::pending()
+            ->whereNull('token_hint')
+            ->get();
+
+        foreach ($legacyInvitations as $invitation) {
             if (Hash::check($token, $invitation->token)) {
                 return $invitation;
             }
