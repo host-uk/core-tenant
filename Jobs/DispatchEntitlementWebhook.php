@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Core\Tenant\Jobs;
 
+use Core\Tenant\Concerns\PreventsSSRF;
 use Core\Tenant\Enums\WebhookDeliveryStatus;
 use Core\Tenant\Models\EntitlementWebhook;
 use Illuminate\Bus\Queueable;
@@ -22,7 +23,7 @@ use Illuminate\Support\Str;
  */
 class DispatchEntitlementWebhook implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use Dispatchable, InteractsWithQueue, PreventsSSRF, Queueable, SerializesModels;
 
     /**
      * The number of times the job may be attempted.
@@ -67,6 +68,37 @@ class DispatchEntitlementWebhook implements ShouldQueue
                 'event' => $this->eventName,
             ]);
 
+            return;
+        }
+
+        // Validate URL for SSRF before making request (DNS rebinding protection)
+        $ssrfValidation = $this->validateUrlForSSRF($webhook->url);
+        if (! $ssrfValidation['valid']) {
+            Log::warning('Entitlement webhook blocked due to SSRF validation failure', [
+                'webhook_id' => $this->webhookId,
+                'event' => $this->eventName,
+                'url' => $webhook->url,
+                'reason' => $ssrfValidation['error'],
+            ]);
+
+            // Record the failed delivery - do not retry SSRF violations
+            $webhook->deliveries()->create([
+                'uuid' => Str::uuid(),
+                'event' => $this->eventName,
+                'attempts' => $this->attempts(),
+                'status' => WebhookDeliveryStatus::FAILED,
+                'payload' => [
+                    'event' => $this->eventName,
+                    'data' => $this->eventPayload,
+                ],
+                'response' => ['error' => 'SSRF validation failed: '.$ssrfValidation['error']],
+                'created_at' => now(),
+            ]);
+
+            $webhook->incrementFailureCount();
+            $webhook->updateLastDeliveryStatus(WebhookDeliveryStatus::FAILED);
+
+            // Do not throw - SSRF violations should not be retried
             return;
         }
 
