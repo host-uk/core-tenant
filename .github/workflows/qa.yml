@@ -98,7 +98,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results
           path: test-results.xml
@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload PHPStan results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: phpstan-results
           path: phpstan.json
@@ -208,7 +208,7 @@ jobs:
 
       - name: Upload Psalm results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: psalm-results
           path: |
@@ -260,7 +260,7 @@ jobs:
 
       - name: Upload style results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: style-results
           path: pint.json
@@ -309,7 +309,7 @@ jobs:
 
       - name: Upload audit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: audit-results
           path: audit.json
@@ -396,7 +396,7 @@ jobs:
             }
 
       - name: Upload combined results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: qa-summary
           path: |
